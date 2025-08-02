@@ -17,7 +17,7 @@ module "source_vpc_public_subnets" {
   subnets                  = var.source_public_subnets
   vpc_id                   = module.source_vpc.vpc_id
   private_ip_google_access = false
-  location                 = var.source_location
+  location                 = var.source_region
 }
 
 module "source_vpc_private_subnets" {
@@ -26,7 +26,34 @@ module "source_vpc_private_subnets" {
   subnets                  = var.source_private_subnets
   vpc_id                   = module.source_vpc.vpc_id
   private_ip_google_access = true
-  location                 = var.source_location
+  location                 = var.source_region
+}
+
+resource "google_compute_address" "source_instance_ip" {
+  name = "source-instance-ip"
+}
+
+# Instance 1
+module "source_instance" {
+  source                    = "./modules/gcp/compute"
+  name                      = "source-instance"
+  machine_type              = "e2-micro"
+  zone                      = "us-central1-a"
+  metadata_startup_script   = "sudo apt-get update; sudo apt-get install nginx -y"
+  deletion_protection       = false
+  allow_stopping_for_update = true
+  image                     = "ubuntu-os-cloud/ubuntu-2004-focal-v20220712"
+  network_interfaces = [
+    {
+      network    = module.source_vpc.vpc_id
+      subnetwork = module.source_vpc_public_subnets.subnets[0].id
+      access_configs = [
+        {
+          nat_ip = google_compute_address.source_instance_ip.address
+        }
+      ]
+    }
+  ]
 }
 
 # -------------------------------------------------------------------
@@ -37,26 +64,26 @@ module "source_vpc_private_subnets" {
 module "destination_vpc" {
   source                = "./modules/aws/vpc/vpc"
   vpc_name              = "destination-vpc"
-  vpc_cidr_block        = "0.0.0.0/0"
+  vpc_cidr_block        = "10.0.2.0/24"
   enable_dns_hostnames  = true
   enable_dns_support    = true
   internet_gateway_name = "destination_vpc_igw"
 }
 
-# RDS Security Group
+# Destination security group
 module "destination_rds_sg" {
   source = "./modules/aws/vpc/security_groups"
   vpc_id = module.destination_vpc.vpc_id
   name   = "destination_rds_sg"
   ingress = [
     {
-      from_port       = 3306
-      to_port         = 3306
+      from_port       = 0
+      to_port         = 0
       protocol        = "tcp"
       self            = "false"
       cidr_blocks     = ["10.0.0.0/16"]
       security_groups = []
-      description     = "MySQL from VPC"
+      description     = "Allow "
     }
   ]
   egress = [
