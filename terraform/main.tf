@@ -64,7 +64,7 @@ module "source_instance" {
 module "destination_vpc" {
   source                = "./modules/aws/vpc/vpc"
   vpc_name              = "destination-vpc"
-  vpc_cidr_block        = "10.0.2.0/24"
+  vpc_cidr_block        = "10.0.0.0/16"
   enable_dns_hostnames  = true
   enable_dns_support    = true
   internet_gateway_name = "destination_vpc_igw"
