@@ -89,7 +89,7 @@ resource "aws_mgn_replication_configuration_template" "main" {
 
   create_public_ip = true # replication servers need public IPs so source agent can reach them
 
-  data_plane_routing         = "PUBLIC_IP" # use PRIVATE_IP if you have VPN/Direct Connect
+  data_plane_routing              = "PUBLIC_IP" # use PRIVATE_IP if you have VPN/Direct Connect
   default_large_staging_disk_type = "GP3"
 
   ebs_encryption = "DEFAULT" # AWS-managed keys; switch to CUSTOM + KMS ARN for CMK
@@ -126,13 +126,13 @@ resource "aws_mgn_launch_configuration_template" "main" {
 
   # Post-launch actions — run SSM documents after launch
   post_launch_actions {
-    deployment                  = "TEST_AND_CUTOVER"
-    s3_log_bucket               = aws_s3_bucket.mgn_staging.bucket
+    deployment    = "TEST_AND_CUTOVER"
+    s3_log_bucket = aws_s3_bucket.mgn_staging.bucket
 
     ssm_documents {
-      action_name             = "InstallSSMAgent"
-      ssm_document            = "AWS-ConfigureAWSPackage"
-      timeout_seconds         = 300
+      action_name              = "InstallSSMAgent"
+      ssm_document             = "AWS-ConfigureAWSPackage"
+      timeout_seconds          = 300
       must_succeed_for_cutover = true
 
       parameters {
@@ -168,9 +168,9 @@ resource "aws_mgn_source_server" "gcp_vm" {
   lifecycle_state = "READY_FOR_TEST" # valid after initial sync: NOT_READY → READY_FOR_TEST → READY_FOR_CUTOVER
 
   tags = {
-    Name        = "source-instance-gcp"
-    SourceVM    = "gcp/us-central1-a/source-instance"
-    Project     = var.project_name
+    Name          = "source-instance-gcp"
+    SourceVM      = "gcp/us-central1-a/source-instance"
+    Project       = var.project_name
     MigrationType = "lift-and-shift"
   }
 }
@@ -180,8 +180,8 @@ resource "aws_mgn_source_server" "gcp_vm" {
 resource "aws_mgn_launch_configuration" "gcp_vm" {
   source_server_id = aws_mgn_source_server.gcp_vm.id
 
-  copy_private_ip  = false
-  copy_tags        = true
+  copy_private_ip    = false
+  copy_tags          = true
   launch_disposition = "STOPPED"
 
   # Target instance type matching e2-micro (~1 vCPU, 1GB RAM)
@@ -201,19 +201,19 @@ resource "aws_mgn_replication_configuration" "gcp_vm" {
 
   # Replicate all disks (boot + data)
   replicated_disks {
-    device_name        = "/dev/sda1" # Ubuntu root disk device name on GCP
-    iops               = 3000
-    throughput         = 125
-    volume_type        = "gp3"
-    staging_disk_type  = "GP3"
+    device_name       = "/dev/sda1" # Ubuntu root disk device name on GCP
+    iops              = 3000
+    throughput        = 125
+    volume_type       = "gp3"
+    staging_disk_type = "GP3"
   }
 
-  bandwidth_throttling              = 0
-  create_public_ip                  = true
-  data_plane_routing                = "PUBLIC_IP"
-  default_large_staging_disk_type   = "GP3"
-  ebs_encryption                    = "DEFAULT"
-  replication_server_instance_type  = var.mgn_replication_server_instance_type
+  bandwidth_throttling             = 0
+  create_public_ip                 = true
+  data_plane_routing               = "PUBLIC_IP"
+  default_large_staging_disk_type  = "GP3"
+  ebs_encryption                   = "DEFAULT"
+  replication_server_instance_type = var.mgn_replication_server_instance_type
 
   replication_servers_security_groups_ids = [
     aws_security_group.mgn_replication_server.id
@@ -242,20 +242,65 @@ resource "aws_iam_service_linked_role" "mgn" {
 # 2. AWSApplicationMigrationReplicationServerRole
 #    Attached to replication server instances — allows them to call
 #    MGN APIs and write to S3 staging.
-resource "aws_iam_role" "mgn_replication_server" {
-  name = "AWSApplicationMigrationReplicationServerRole"
-
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect    = "Allow"
-        Principal = { Service = "ec2.amazonaws.com" }
-        Action    = "sts:AssumeRole"
-      }
-    ]
-  })
-
+module "mgn_replication_server" {
+  source             = "./modules/aws/iam"
+  role_name          = "AWSApplicationMigrationReplicationServerRole"
+  role_description   = "AWSApplicationMigrationReplicationServerRole"
+  policy_name        = "AWSApplicationMigrationReplicationServerRolePolicy"
+  policy_description = "AWSApplicationMigrationReplicationServerRolePolicy"
+  assume_role_policy = <<EOF
+    {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Action": "sts:AssumeRole",
+                "Principal": {
+                  "Service": "ec2.amazonaws.com"
+                },
+                "Effect": "Allow",
+                "Sid": ""
+            }
+        ]
+    }
+    EOF
+  policy             = <<EOF
+    {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Action": [
+                  "mgn:SendClientMetricsForMgn",
+                  "mgn:RegisterAgentForMgn",
+                  "mgn:GetChannelCommandsForMgn",
+                  "mgn:SendChannelCommandResultForMgn",
+                  "mgn:ListTagsForResource",
+                  "ec2:DescribeInstances",
+                  "ec2:DescribeVolumes",
+                  "ec2:DescribeSnapshots",
+                  "ec2:CreateTags",
+                  "ec2:DescribeTags"
+                ],
+                "Resource": "*",
+                "Effect": "Allow"
+            },
+            {
+                "Action": [
+                  "s3:GetObject",
+                  "s3:PutObject",
+                  "s3:ListBucket",
+                  "s3:GetBucketLocation",
+                  "s3:AbortMultipartUpload",
+                  "s3:ListMultipartUploadParts"
+                ],
+                "Resource": [
+                  "${aws_s3_bucket.mgn_staging.arn}",
+                  "${aws_s3_bucket.mgn_staging.arn}/*"
+                ],
+                "Effect": "Allow"
+            }
+        ]
+    }
+    EOF
   tags = {
     Name    = "mgn-replication-server-role"
     Project = var.project_name
@@ -263,57 +308,13 @@ resource "aws_iam_role" "mgn_replication_server" {
 }
 
 resource "aws_iam_role_policy_attachment" "mgn_replication_server" {
-  role       = aws_iam_role.mgn_replication_server.name
+  role       = module.mgn_replication_server.name
   policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
-}
-
-resource "aws_iam_role_policy" "mgn_replication_server_inline" {
-  name = "mgn-replication-inline"
-  role = aws_iam_role.mgn_replication_server.id
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Sid    = "MGNReplication"
-        Effect = "Allow"
-        Action = [
-          "mgn:SendClientMetricsForMgn",
-          "mgn:RegisterAgentForMgn",
-          "mgn:GetChannelCommandsForMgn",
-          "mgn:SendChannelCommandResultForMgn",
-          "mgn:ListTagsForResource",
-          "ec2:DescribeInstances",
-          "ec2:DescribeVolumes",
-          "ec2:DescribeSnapshots",
-          "ec2:CreateTags",
-          "ec2:DescribeTags"
-        ]
-        Resource = "*"
-      },
-      {
-        Sid    = "S3StagingAccess"
-        Effect = "Allow"
-        Action = [
-          "s3:GetObject",
-          "s3:PutObject",
-          "s3:ListBucket",
-          "s3:GetBucketLocation",
-          "s3:AbortMultipartUpload",
-          "s3:ListMultipartUploadParts"
-        ]
-        Resource = [
-          aws_s3_bucket.mgn_staging.arn,
-          "${aws_s3_bucket.mgn_staging.arn}/*"
-        ]
-      }
-    ]
-  })
 }
 
 resource "aws_iam_instance_profile" "mgn_replication_server" {
   name = "AWSApplicationMigrationReplicationServerRole"
-  role = aws_iam_role.mgn_replication_server.name
+  role = module.mgn_replication_server.name
 }
 
 # 3. AWSApplicationMigrationEC2Access
@@ -577,9 +578,9 @@ resource "aws_launch_template" "migrated_instance" {
   tag_specifications {
     resource_type = "instance"
     tags = {
-      Name        = "migrated-from-gcp-source-instance"
-      Project     = var.project_name
-      SourceVM    = "gcp/us-central1-a/source-instance"
+      Name     = "migrated-from-gcp-source-instance"
+      Project  = var.project_name
+      SourceVM = "gcp/us-central1-a/source-instance"
     }
   }
 
