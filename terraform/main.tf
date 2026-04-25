@@ -73,7 +73,7 @@ resource "aws_mgn_replication_configuration_template" "main" {
   # Replication servers live in the public subnet so they have internet
   # access to reach GCP source agent over TCP 1500.
   replication_servers_security_groups_ids = [
-    aws_security_group.mgn_replication_server.id
+    module.mgn_replication_server_sg.id
   ]
 
   staging_area_subnet_id = aws_subnet.target_public.id
@@ -216,7 +216,7 @@ resource "aws_mgn_replication_configuration" "gcp_vm" {
   replication_server_instance_type = var.mgn_replication_server_instance_type
 
   replication_servers_security_groups_ids = [
-    aws_security_group.mgn_replication_server.id
+    module.mgn_replication_server_sg.id
   ]
 
   staging_area_subnet_id = aws_subnet.target_public.id
@@ -398,72 +398,69 @@ resource "aws_secretsmanager_secret_version" "mgn_agent_credentials" {
 # Replication server SG
 # Inbound:  TCP 1500 from source GCP VM public IP (data channel)
 # Outbound: all (needs to reach S3, MGN endpoints, EC2 APIs)
-resource "aws_security_group" "mgn_replication_server" {
-  name        = "${var.project_name}-mgn-replication-sg"
-  description = "MGN staging replication server — accepts data from source agent"
-  vpc_id      = aws_vpc.target.id
-
-  ingress {
-    description = "MGN data replication channel from source agent"
-    from_port   = 1500
-    to_port     = 1500
-    protocol    = "tcp"
-    cidr_blocks = ["${google_compute_address.source_instance_ip.address}/32"]
-  }
-
-  # Allow SSM (no SSH needed)
-  egress {
-    description = "Allow all outbound"
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
+module "mgn_replication_server_sg" {
+  source = "./modules/aws/security-groups"
+  name   = "${var.project_name}-mgn-replication-sg"
+  vpc_id = module.destination_vpc.vpc_id
+  ingress_rules = [
+    {
+      description = "MGN data replication channel from source agent"
+      from_port   = 1500
+      to_port     = 1500
+      protocol    = "tcp"
+      cidr_blocks = ["${google_compute_address.source_instance_ip.address}/32"]
+    }
+  ]
+  egress_rules = [
+    {
+      description = "Allow all outbound"
+      from_port   = 0
+      to_port     = 0
+      protocol    = "-1"
+      cidr_blocks = ["0.0.0.0/0"]
+    }
+  ]
   tags = {
     Name    = "${var.project_name}-replication-sg"
     Project = var.project_name
   }
 }
 
-# Migrated instance SG (applied after launch/cutover)
-resource "aws_security_group" "migrated_instance" {
-  name        = "${var.project_name}-migrated-instance-sg"
-  description = "SG for the migrated GCP instance running on EC2"
-  vpc_id      = aws_vpc.target.id
-
-  ingress {
-    description = "HTTP (nginx)"
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  ingress {
-    description = "HTTPS"
-    from_port   = 443
-    to_port     = 443
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  # Add your office / bastion CIDR here instead of 0.0.0.0/0
-  ingress {
-    description = "SSH (restrict to your IP in production)"
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
+module "migrated_instance_sg" {
+  source = "./modules/aws/security-groups"
+  name   = "${var.project_name}-migrated-instance-sg"
+  vpc_id = module.destination_vpc.vpc_id
+  ingress_rules = [
+    {
+      description = "HTTP (nginx)"
+      from_port   = 80
+      to_port     = 80
+      protocol    = "tcp"
+      cidr_blocks = ["0.0.0.0/0"]
+    },
+    {
+      description = "HTTPS"
+      from_port   = 443
+      to_port     = 443
+      protocol    = "tcp"
+      cidr_blocks = ["0.0.0.0/0"]
+    },
+    {
+      description = "SSH (restrict to your IP in production)"
+      from_port   = 22
+      to_port     = 22
+      protocol    = "tcp"
+      cidr_blocks = ["0.0.0.0/0"]
+    }
+  ]
+  egress_rules = [
+    {
+      from_port   = 0
+      to_port     = 0
+      protocol    = "-1"
+      cidr_blocks = ["0.0.0.0/0"]
+    }
+  ]
   tags = {
     Name    = "${var.project_name}-migrated-sg"
     Project = var.project_name
@@ -559,7 +556,7 @@ resource "aws_launch_template" "migrated_instance" {
   # This AMI is a fallback only.
   image_id = data.aws_ami.amazon_linux_2023.id
 
-  vpc_security_group_ids = [aws_security_group.migrated_instance.id]
+  vpc_security_group_ids = [module.migrated_instance_sg.id]
 
   iam_instance_profile {
     name = aws_iam_instance_profile.migrated_instance_ssm.name
