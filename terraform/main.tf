@@ -373,23 +373,37 @@ resource "aws_iam_access_key" "mgn_agent" {
   user = aws_iam_user.mgn_agent.name
 }
 
-resource "aws_secretsmanager_secret" "mgn_agent_credentials" {
+module "mgn_agent_credentials" {
+  source                  = "./modules/aws/secrets-manager"
   name                    = "mgn/agent-credentials"
   description             = "AWS access key used by MGN replication agent on GCP source instance"
   recovery_window_in_days = 7
-
+  secret_string = jsonencode({
+    access_key_id     = aws_iam_access_key.mgn_agent.id
+    secret_access_key = aws_iam_access_key.mgn_agent.secret
+  })
   tags = {
     Project = var.project_name
   }
 }
 
-resource "aws_secretsmanager_secret_version" "mgn_agent_credentials" {
-  secret_id = aws_secretsmanager_secret.mgn_agent_credentials.id
-  secret_string = jsonencode({
-    access_key_id     = aws_iam_access_key.mgn_agent.id
-    secret_access_key = aws_iam_access_key.mgn_agent.secret
-  })
-}
+# resource "aws_secretsmanager_secret" "mgn_agent_credentials" {
+#   name                    = "mgn/agent-credentials"
+#   description             = "AWS access key used by MGN replication agent on GCP source instance"
+#   recovery_window_in_days = 7
+
+#   tags = {
+#     Project = var.project_name
+#   }
+# }
+
+# resource "aws_secretsmanager_secret_version" "mgn_agent_credentials" {
+#   secret_id = aws_secretsmanager_secret.mgn_agent_credentials.id
+#   secret_string = jsonencode({
+#     access_key_id     = aws_iam_access_key.mgn_agent.id
+#     secret_access_key = aws_iam_access_key.mgn_agent.secret
+#   })
+# }
 
 # -------------------------------------------------------------------
 # Security Groups
@@ -532,7 +546,6 @@ data "aws_caller_identity" "current" {}
 # -------------------------------------------------------------------
 # EC2 Launch Template — used by MGN when launching test/cutover instances
 # -------------------------------------------------------------------
-
 data "aws_ami" "amazon_linux_2023" {
   most_recent = true
   owners      = ["amazon"]
@@ -548,47 +561,45 @@ data "aws_ami" "amazon_linux_2023" {
   }
 }
 
-resource "aws_launch_template" "migrated_instance" {
-  name_prefix   = "${var.project_name}-migrated-"
-  instance_type = var.target_instance_type
-
-  # MGN overwrites the AMI at launch with the converted snapshot.
-  # This AMI is a fallback only.
-  image_id = data.aws_ami.amazon_linux_2023.id
-
-  vpc_security_group_ids = [module.migrated_instance_sg.id]
-
-  iam_instance_profile {
-    name = aws_iam_instance_profile.migrated_instance_ssm.name
-  }
-
-  metadata_options {
+module "launch_template" {
+  source                               = "./modules/aws/launch_template"
+  name                                 = "${var.project_name}-migrated-"
+  description                          = "${var.project_name}-migrated-"
+  ebs_optimized                        = false
+  image_id                             = data.aws_ami.amazon_linux_2023.id
+  instance_type                        = var.target_instance_type
+  instance_initiated_shutdown_behavior = "stop"
+  instance_profile_name                = aws_iam_instance_profile.migrated_instance_ssm.name
+  key_name                             = "madmaxkeypair"
+  monitoring_enabled                   = true
+  network_interfaces = [
+    {
+      associate_public_ip_address = true
+      security_groups             = [module.migrated_instance_sg.id]
+    }
+  ]
+  instance_metadata_options = {
     http_endpoint               = "enabled"
-    http_tokens                 = "required" # IMDSv2 enforced
-    http_put_response_hop_limit = 1
+    http_tokens                 = "required"
+    http_put_response_hop_limit = 2
   }
-
-  monitoring {
-    enabled = true
-  }
-
-  tag_specifications {
-    resource_type = "instance"
-    tags = {
-      Name     = "migrated-from-gcp-source-instance"
-      Project  = var.project_name
-      SourceVM = "gcp/us-central1-a/source-instance"
+  tag_specs = [
+    {
+      resource_type = "instance"
+      tags = {
+        Name     = "migrated-from-gcp-source-instance"
+        Project  = var.project_name
+        SourceVM = "gcp/us-central1-a/source-instance"
+      }
+    },
+    {
+      resource_type = "volume"
+      tags = {
+        Name    = "migrated-from-gcp-root-volume"
+        Project = var.project_name
+      }
     }
-  }
-
-  tag_specifications {
-    resource_type = "volume"
-    tags = {
-      Name    = "migrated-from-gcp-root-volume"
-      Project = var.project_name
-    }
-  }
-
+  ]
   user_data = base64encode(<<-EOT
     #!/bin/bash
     # Post-migration bootstrap
@@ -609,16 +620,82 @@ resource "aws_launch_template" "migrated_instance" {
     systemctl start nginx
   EOT
   )
-
   tags = {
     Name    = "${var.project_name}-launch-template"
     Project = var.project_name
   }
-
-  lifecycle {
-    create_before_destroy = true
-  }
 }
+
+# resource "aws_launch_template" "migrated_instance" {
+#   name_prefix   = "${var.project_name}-migrated-"
+#   instance_type = var.target_instance_type
+
+#   # MGN overwrites the AMI at launch with the converted snapshot.
+#   # This AMI is a fallback only.
+#   image_id = data.aws_ami.amazon_linux_2023.id
+
+#   vpc_security_group_ids = [module.migrated_instance_sg.id]
+
+#   iam_instance_profile {
+#     name = aws_iam_instance_profile.migrated_instance_ssm.name
+#   }
+
+#   metadata_options {
+#     http_endpoint               = "enabled"
+#     http_tokens                 = "required" # IMDSv2 enforced
+#     http_put_response_hop_limit = 1
+#   }
+
+#   monitoring {
+#     enabled = true
+#   }
+#   tag_specifications {
+#     resource_type = "instance"
+#     tags = {
+#       Name     = "migrated-from-gcp-source-instance"
+#       Project  = var.project_name
+#       SourceVM = "gcp/us-central1-a/source-instance"
+#     }
+#   }
+
+#   tag_specifications {
+#     resource_type = "volume"
+#     tags = {
+#       Name    = "migrated-from-gcp-root-volume"
+#       Project = var.project_name
+#     }
+#   }
+
+#   user_data = base64encode(<<-EOT
+#     #!/bin/bash
+#     # Post-migration bootstrap
+#     # MGN converts the disk image, so nginx should already be installed.
+#     # This script handles any AWS-specific setup needed after cutover.
+
+#     # Install SSM agent (in case it wasn't on the source)
+#     snap install amazon-ssm-agent --classic || true
+#     systemctl enable snap.amazon-ssm-agent.amazon-ssm-agent.service
+#     systemctl start snap.amazon-ssm-agent.amazon-ssm-agent.service
+
+#     # Install CloudWatch agent
+#     wget -q https://s3.amazonaws.com/amazoncloudwatch-agent/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb
+#     dpkg -i amazon-cloudwatch-agent.deb
+
+#     # Ensure nginx is running (should already be from GCP startup script)
+#     systemctl enable nginx
+#     systemctl start nginx
+#   EOT
+#   )
+
+#   tags = {
+#     Name    = "${var.project_name}-launch-template"
+#     Project = var.project_name
+#   }
+
+#   lifecycle {
+#     create_before_destroy = true
+#   }
+# }
 
 # SSM instance profile for migrated EC2
 resource "aws_iam_role" "migrated_instance_ssm" {
