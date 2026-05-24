@@ -7,7 +7,7 @@ module "source_vpc" {
   delete_default_routes_on_create = false
   auto_create_subnetworks         = false
   routing_mode                    = "REGIONAL"
-  region                          = var.location
+  region                          = var.source_region
   subnets                         = []
   firewall_data                   = []
 }
@@ -28,7 +28,7 @@ module "source_instance" {
   network_interfaces = [
     {
       network    = module.source_vpc.vpc_id
-      subnetwork = module.source_vpc_public_subnets.subnets[0].id
+      subnetwork = module.source_vpc.subnets[0].id
       access_configs = [
         {
           nat_ip = google_compute_address.source_instance_ip.address
@@ -62,57 +62,8 @@ module "destination_vpc" {
 }
 
 # -------------------------------------------------------------------
-# AWS Application Migration Service (MGN)
-# -------------------------------------------------------------------
-
-# Initialize MGN in this account/region
-# This is idempotent — safe to apply even if MGN is already initialized.
-resource "aws_mgn_replication_configuration_template" "main" {
-  replication_server_instance_type = var.mgn_replication_server_instance_type
-
-  # Replication servers live in the public subnet so they have internet
-  # access to reach GCP source agent over TCP 1500.
-  replication_servers_security_groups_ids = [
-    module.mgn_replication_server_sg.id
-  ]
-
-  staging_area_subnet_id = aws_subnet.target_public.id
-  staging_area_tags      = var.mgn_staging_area_tags
-
-  # Use your own S3 bucket for staging (optional — MGN can manage its own)
-  # Remove this block to let MGN use its auto-created bucket.
-  # Keeping it here for auditability.
-
-  associate_default_security_group = false
-
-  bandwidth_throttling = 0 # 0 = unlimited; set MB/s if source has limited uplink
-
-  create_public_ip = true # replication servers need public IPs so source agent can reach them
-
-  data_plane_routing              = "PUBLIC_IP" # use PRIVATE_IP if you have VPN/Direct Connect
-  default_large_staging_disk_type = "GP3"
-
-  ebs_encryption = "DEFAULT" # AWS-managed keys; switch to CUSTOM + KMS ARN for CMK
-
-  use_dedicated_replication_server = false # true = dedicated EC2, more expensive
-
-  replication_configuration_template_id = null # auto-assigned
-
-  tags = {
-    Name    = "${var.project_name}-replication-template"
-    Project = var.project_name
-  }
-
-  depends_on = [
-    aws_iam_service_linked_role.mgn,
-    aws_iam_instance_profile.mgn_replication_server
-  ]
-}
-
-# -------------------------------------------------------------------
 # Launch Template — defines EC2 config for test / cutover instances
 # -------------------------------------------------------------------
-
 resource "aws_mgn_launch_configuration_template" "main" {
   # Associate migrated instance with the target subnet
   target_instance_type_right_sizing_method = "NONE" # BASIC = auto right-size; NONE = use your defined type
@@ -148,8 +99,6 @@ resource "aws_mgn_launch_configuration_template" "main" {
       }
     }
   }
-
-  depends_on = [aws_mgn_replication_configuration_template.main]
 }
 
 # -------------------------------------------------------------------
@@ -175,29 +124,9 @@ resource "aws_mgn_source_server" "gcp_vm" {
   }
 }
 
-# Per-source-server launch configuration
-# Applied after aws_mgn_source_server is imported.
-resource "aws_mgn_launch_configuration" "gcp_vm" {
-  source_server_id = aws_mgn_source_server.gcp_vm.id
-
-  copy_private_ip    = false
-  copy_tags          = true
-  launch_disposition = "STOPPED"
-
-  # Target instance type matching e2-micro (~1 vCPU, 1GB RAM)
-  target_instance_type_right_sizing_method = "NONE"
-
-  enable_map_auto_tagging = true
-
-  # EC2 launch template overrides applied to the migrated instance
-  ec2_launch_template_id = aws_launch_template.migrated_instance.id
-}
-
 # Per-source-server replication configuration
 resource "aws_mgn_replication_configuration" "gcp_vm" {
   source_server_id = aws_mgn_source_server.gcp_vm.id
-
-  replication_configuration_template_id = aws_mgn_replication_configuration_template.main.id
 
   # Replicate all disks (boot + data)
   replicated_disks {
@@ -408,10 +337,6 @@ module "mgn_agent_credentials" {
 # -------------------------------------------------------------------
 # Security Groups
 # -------------------------------------------------------------------
-
-# Replication server SG
-# Inbound:  TCP 1500 from source GCP VM public IP (data channel)
-# Outbound: all (needs to reach S3, MGN endpoints, EC2 APIs)
 module "mgn_replication_server_sg" {
   source = "./modules/aws/security-groups"
   name   = "${var.project_name}-mgn-replication-sg"
@@ -422,6 +347,7 @@ module "mgn_replication_server_sg" {
       from_port   = 1500
       to_port     = 1500
       protocol    = "tcp"
+      security_groups = []
       cidr_blocks = ["${google_compute_address.source_instance_ip.address}/32"]
     }
   ]
@@ -450,6 +376,7 @@ module "migrated_instance_sg" {
       from_port   = 80
       to_port     = 80
       protocol    = "tcp"
+      security_groups = []
       cidr_blocks = ["0.0.0.0/0"]
     },
     {
@@ -457,6 +384,7 @@ module "migrated_instance_sg" {
       from_port   = 443
       to_port     = 443
       protocol    = "tcp"
+      security_groups = []
       cidr_blocks = ["0.0.0.0/0"]
     },
     {
@@ -464,6 +392,7 @@ module "migrated_instance_sg" {
       from_port   = 22
       to_port     = 22
       protocol    = "tcp"
+      security_groups = []
       cidr_blocks = ["0.0.0.0/0"]
     }
   ]
